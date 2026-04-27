@@ -2,6 +2,7 @@
 
 import os
 import math
+import time
 import discord
 from discord import app_commands
 from discord.ext import commands, tasks
@@ -29,7 +30,7 @@ VATSIM_CACHE_SECONDS = 60  # re-fetch feed at most once per minute
 # Prefixes cover Seattle ARTCC: Seattle, Portland, Eugene, Hillsboro
 ZSE_PREFIXES = ("SEA_", "PDX_", "EUG_", "HIO_")
 
-# KPDX coordinates for distance calculation (arrivals within 30 min)
+# Airport coordinates for distance calculation
 # Used in haversine to estimate if an aircraft is inbound within range
 AIRPORT_COORDS = {
     "KPDX": (45.5887, -122.5975),
@@ -97,7 +98,6 @@ async def fetch_vatsim() -> dict | None:
     when multiple commands fire in quick succession.
     """
     global vatsim_cache, vatsim_cache_time
-    import time
     now = time.monotonic()
     # Return cached data if still fresh
     if vatsim_cache is not None and (now - vatsim_cache_time) < VATSIM_CACHE_SECONDS:
@@ -114,14 +114,11 @@ def haversine(lat1: float, lon1: float, lat2: float, lon2: float) -> float:
     """
     Calculate great-circle distance in nautical miles between two coordinates.
     Used to determine if an arriving aircraft is within range of the airport.
-    Formula: haversine — standard spherical distance calculation.
     """
     R = 3440.065  # Earth radius in nautical miles
-    # Convert degrees to radians for trig functions
     phi1, phi2 = math.radians(lat1), math.radians(lat2)
     dphi = math.radians(lat2 - lat1)
     dlambda = math.radians(lon2 - lon1)
-    # Core haversine formula
     a = math.sin(dphi / 2) ** 2 + math.cos(phi1) * math.cos(phi2) * math.sin(dlambda / 2) ** 2
     return R * 2 * math.asin(math.sqrt(a))
 
@@ -133,28 +130,6 @@ def estimate_minutes_out(dist_nm: float, groundspeed: int) -> float | None:
     if groundspeed < 50:
         return None
     return (dist_nm / groundspeed) * 60
-
-def check_altitude_parity(altitude_str: str, heading: float) -> str:
-    """
-    Check if filed altitude follows the hemispherical rule:
-    - Magnetic track 0-179° (eastbound): odd thousands (FL190, FL210, etc.)
-    - Magnetic track 180-359° (westbound): even thousands (FL180, FL200, etc.)
-    Returns a string flag: 'OK', 'MISMATCH', or 'UNABLE TO CHECK'.
-    Note: uses true heading as proxy for magnetic track — close enough for VATSIM.
-    """
-    try:
-        # Strip leading 'FL' if present, then parse as integer
-        alt = int(altitude_str.replace("FL", "").strip()) * 100 if "FL" in altitude_str.upper() else int(altitude_str)
-        thousands = (alt // 1000)
-        is_odd = thousands % 2 != 0
-        eastbound = heading < 180
-        # Eastbound should be odd, westbound should be even
-        if (eastbound and is_odd) or (not eastbound and not is_odd):
-            return "✅ OK"
-        else:
-            return "⚠️ MISMATCH"
-    except Exception:
-        return "❓ Unable to check"
 
 # --- On ready: sync slash commands and start polling ---
 @bot.event
@@ -253,22 +228,25 @@ async def flightplan(interaction: discord.Interaction, callsign: str):
     if data is None:
         await interaction.followup.send("Unable to reach VATSIM data feed.")
         return
-    # Search pilots list for exact callsign match
+    # Search connected pilots first, then fall back to prefiles
     pilot = next((p for p in data.get("pilots", []) if p["callsign"] == callsign), None)
+    is_prefile = False
     if pilot is None:
-        await interaction.followup.send(f"No active pilot found for `{callsign}`.")
+        pilot = next((p for p in data.get("prefiles", []) if p["callsign"] == callsign), None)
+        is_prefile = True
+    if pilot is None:
+        await interaction.followup.send(f"No pilot or prefile found for `{callsign}`.")
         return
     fp = pilot.get("flight_plan")
     if fp is None:
-        await interaction.followup.send(f"`{callsign}` is online but has no flight plan filed.")
+        await interaction.followup.send(f"`{callsign}` has no flight plan filed.")
         return
-    # Build altitude parity check using current heading
-    parity = check_altitude_parity(fp.get("altitude", ""), pilot.get("heading", 0))
+
     # Format and send the flight plan summary
     lines = [
-        f"**{callsign}** — {fp.get('aircraft_short', 'N/A')} ({fp.get('flight_rules', '?')})",
+        f"**{callsign}**{'  ⚠️ PREFILE' if is_prefile else ''} — {fp.get('aircraft_short', 'N/A')} ({fp.get('flight_rules', '?')})",
         f"**Route:** {fp.get('departure', '?')} → {fp.get('arrival', '?')} (Alt: {fp.get('alternate', 'N/A')})",
-        f"**Altitude:** {fp.get('altitude', '?')} ft  |  Parity: {parity}",
+        f"**Altitude:** {fp.get('altitude', '?')} ft",
         f"**CAS:** {fp.get('cruise_tas', '?')} kts",
         f"**ETD:** {fp.get('deptime', '?')}z  |  ETE: {fp.get('enroute_time', '?')}",
         f"**Squawk:** {fp.get('assigned_transponder', 'N/A')}",
@@ -291,52 +269,23 @@ async def route(interaction: discord.Interaction, callsign: str):
     if data is None:
         await interaction.followup.send("Unable to reach VATSIM data feed.")
         return
+    # Search connected pilots first, then fall back to prefiles
     pilot = next((p for p in data.get("pilots", []) if p["callsign"] == callsign), None)
+    is_prefile = False
     if pilot is None:
-        await interaction.followup.send(f"No active pilot found for `{callsign}`.")
+        pilot = next((p for p in data.get("prefiles", []) if p["callsign"] == callsign), None)
+        is_prefile = True
+    if pilot is None:
+        await interaction.followup.send(f"No pilot or prefile found for `{callsign}`.")
         return
     fp = pilot.get("flight_plan")
     if not fp or not fp.get("route"):
         await interaction.followup.send(f"`{callsign}` has no route filed.")
         return
-    # Display departure, arrival, and full route string
+    # Display departure, arrival, prefile tag if applicable, and full route string
     output = (
-        f"**{callsign}** — {fp.get('departure', '?')} → {fp.get('arrival', '?')}\n"
+        f"**{callsign}**{'  ⚠️ PREFILE' if is_prefile else ''} — {fp.get('departure', '?')} → {fp.get('arrival', '?')}\n"
         f"```\n{fp['route']}\n```"
-    )
-    await interaction.followup.send(output)
-
-# --- /altitude: filed altitude and parity check for a callsign ---
-@bot.tree.command(
-    name="altitude",
-    description="Check filed altitude and hemispherical rule for a VATSIM callsign",
-)
-@app_commands.allowed_contexts(guilds=True, dms=True, private_channels=True)
-@app_commands.allowed_installs(guilds=True, users=True)
-@app_commands.describe(callsign="VATSIM callsign, e.g. UAL123")
-async def altitude(interaction: discord.Interaction, callsign: str):
-    await interaction.response.defer()
-    callsign = callsign.upper()
-    data = await fetch_vatsim()
-    if data is None:
-        await interaction.followup.send("Unable to reach VATSIM data feed.")
-        return
-    pilot = next((p for p in data.get("pilots", []) if p["callsign"] == callsign), None)
-    if pilot is None:
-        await interaction.followup.send(f"No active pilot found for `{callsign}`.")
-        return
-    fp = pilot.get("flight_plan")
-    if not fp:
-        await interaction.followup.send(f"`{callsign}` has no flight plan filed.")
-        return
-    heading = pilot.get("heading", 0)
-    filed_alt = fp.get("altitude", "N/A")
-    parity = check_altitude_parity(filed_alt, heading)
-    output = (
-        f"**{callsign}**\n"
-        f"Filed Altitude: `{filed_alt}` ft\n"
-        f"Current Heading: `{heading}°`\n"
-        f"Hemispherical Rule: {parity}"
     )
     await interaction.followup.send(output)
 
@@ -421,7 +370,7 @@ async def controllers(interaction: discord.Interaction):
         return
     lines = ["**ZSE Controllers Online**"]
     for c in sorted(zse, key=lambda x: x["callsign"]):
-        # logon_time is ISO8601 — show callsign, frequency, and name
+        # Show callsign, frequency, and name
         lines.append(f"`{c['callsign']}` — {c.get('frequency', '?')} MHz | {c.get('name', '?')}")
     await interaction.followup.send("\n".join(lines))
 

@@ -19,23 +19,24 @@ intents.guilds = True
 bot = commands.Bot(command_prefix="!", intents=intents)
 guild_obj = discord.Object(id=GUILD_ID)
 
-# --- On ready: sync slash commands to the guild ---
+# --- On ready: sync slash commands globally and to the guild ---
 @bot.event
 async def on_ready():
-    # One-time cleanup of stale global commands; safe to leave in
-    bot.tree.clear_commands(guild=None)
-    await bot.tree.sync()
-    # Guild-scoped sync (instant propagation)
+    # Clear stale guild commands so we don't have duplicates
+    bot.tree.clear_commands(guild=guild_obj)
     await bot.tree.sync(guild=guild_obj)
+    # Sync globally for DMs and user installs
+    await bot.tree.sync()
     print(f"Logged in as {bot.user}")
 
 # --- /metar: current METAR for a given ICAO ---
 @bot.tree.command(
     name="metar",
     description="Get the latest METAR for an airport",
-    guild=guild_obj,
 )
-@app_commands.describe(icao="ICAO code, e.g. KPDX")
+@app_commands.allowed_contexts(guilds=True, dms=True, private_channels=True)
+@app_commands.allowed_installs(guilds=True, users=True)
+@app_commands.describe(icao="ICAO code, e.g. KCVO")
 async def metar(interaction: discord.Interaction, icao: str):
     await interaction.response.defer()
     icao = icao.upper()
@@ -52,9 +53,10 @@ async def metar(interaction: discord.Interaction, icao: str):
 @bot.tree.command(
     name="taf",
     description="Get the latest TAF for an airport",
-    guild=guild_obj,
 )
-@app_commands.describe(icao="ICAO code, e.g. KPDX")
+@app_commands.allowed_contexts(guilds=True, dms=True, private_channels=True)
+@app_commands.allowed_installs(guilds=True, users=True)
+@app_commands.describe(icao="ICAO code, e.g. KEUG")
 async def taf(interaction: discord.Interaction, icao: str):
     await interaction.response.defer()
     icao = icao.upper()
@@ -70,10 +72,11 @@ async def taf(interaction: discord.Interaction, icao: str):
 # --- /atis: current D-ATIS for a given US airport (via atis.info) ---
 @bot.tree.command(
     name="atis",
-    description="Get the latest D-ATIS for a US airport",
-    guild=guild_obj,
+    description="Get the latest Digital ATIS",
 )
-@app_commands.describe(icao="ICAO code, e.g. KPDX")
+@app_commands.allowed_contexts(guilds=True, dms=True, private_channels=True)
+@app_commands.allowed_installs(guilds=True, users=True)
+@app_commands.describe(icao="ICAO code, e.g. KCVO")
 async def atis(interaction: discord.Interaction, icao: str):
     await interaction.response.defer()
     icao = icao.upper()
@@ -90,6 +93,8 @@ async def atis(interaction: discord.Interaction, icao: str):
         f"**{d['type'].upper()}**\n```\n{d['datis']}\n```" for d in data
     )
     await interaction.followup.send(output)
+
+
 
 # --- Run the bot ---
 bot.run(TOKEN)

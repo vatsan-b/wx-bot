@@ -1,8 +1,8 @@
-# wx-bot
+# VATBot
 
 <!-- ![WX Bot Banner](path/to/banner-image.png) -->
 
-A lightweight Discord bot for real-time aviation weather — METAR, TAF, and D-ATIS via slash commands.
+A Discord bot for real-time aviation weather — METAR, TAF, and D-ATIS, and fetching VATSIM network data via slash commands.
 
 Built for [VATSIM](https://vatsim.net) pilots and air traffic controllers.
 
